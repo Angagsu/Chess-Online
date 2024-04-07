@@ -3,6 +3,15 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
+
+public enum SpecialMove
+{
+    None,
+    InPassing,
+    Castling,
+    Promotion
+}
+
 public class Chessboard : MonoBehaviour
 {
     [Header("Art stuff")]
@@ -13,6 +22,7 @@ public class Chessboard : MonoBehaviour
     [SerializeField] private float deathSize = 0.3f;
     [SerializeField] private float deathSpacing = 0.3f;
     [SerializeField] private float dragOffset = 1f;
+    [SerializeField] private GameObject victoryScreen;
 
     [Header("Prefabs & Materials")]
     [SerializeField] private GameObject[] prefabs;
@@ -25,14 +35,22 @@ public class Chessboard : MonoBehaviour
     private ChessPiece currentlyDragging;
     private List<ChessPiece> deadWhites = new List<ChessPiece>();
     private List<ChessPiece> deadBlackes = new List<ChessPiece>();
+    private List<Vector2Int> availableMoves = new List<Vector2Int>();
     private GameObject[,] tiles;
     private Camera currentCamera;
     private Vector2Int currentHover;
     private Vector3 bounds;
     private Vector3 tileCenter;
 
+    private bool isWhiteTurn;
+
+    private SpecialMove specialMove;
+    private List<Vector2Int[]> moveList = new List<Vector2Int[]>();
+
     private void Awake()
     {
+        isWhiteTurn = true;
+
         GenerateAllTiles(tileSize, TILE_COUNT_X, TILE_COUNT_Y);
         tileCenter = new Vector3(tileSize / 2, 0, tileSize / 2);
         SpawnAllPieces();
@@ -50,7 +68,7 @@ public class Chessboard : MonoBehaviour
         RaycastHit info;
         Ray ray = currentCamera.ScreenPointToRay(Input.mousePosition);
 
-        if (Physics.Raycast(ray, out info, 100, LayerMask.GetMask("Tile", "Hover")))
+        if (Physics.Raycast(ray, out info, 100, LayerMask.GetMask("Tile", "Hover", "Highlight")))
         {
             Vector2Int hitPosition = LookupTileIndex(info.transform.gameObject);
 
@@ -62,7 +80,11 @@ public class Chessboard : MonoBehaviour
 
             if (currentHover != hitPosition)
             {
-                tiles[currentHover.x, currentHover.y].layer = LayerMask.NameToLayer("Tile");
+                tiles[currentHover.x, currentHover.y].layer = 
+                    ContainsValidMove(ref availableMoves, currentHover) ?
+                    LayerMask.NameToLayer("Highlight") :
+                    LayerMask.NameToLayer("Tile");
+
                 currentHover = hitPosition;
                 tiles[hitPosition.x, hitPosition.y].layer = LayerMask.NameToLayer("Hover");
             }
@@ -72,9 +94,14 @@ public class Chessboard : MonoBehaviour
                 if (chessPieces[hitPosition.x, hitPosition.y] != null)
                 {
                     // Is it our turn?
-                    if (true)
+                    if (chessPieces[hitPosition.x, hitPosition.y].Team == 0 && isWhiteTurn ||
+                        chessPieces[hitPosition.x, hitPosition.y].Team == 1 && !isWhiteTurn)
                     {
                         currentlyDragging = chessPieces[hitPosition.x, hitPosition.y];
+                        availableMoves = currentlyDragging.GetAvailableMoves(ref chessPieces, TILE_COUNT_X, TILE_COUNT_Y);
+                        specialMove = currentlyDragging.GetSpecialMove(ref chessPieces, ref moveList, ref availableMoves);
+                        PreventCheck();
+                        HighlightTiles();
                     }
                 }
             }
@@ -88,19 +115,21 @@ public class Chessboard : MonoBehaviour
                 if (!validMove)
                 {
                     currentlyDragging.SetPosition(GetTileCenter(previousPosition.x, previousPosition.y));
-                    currentlyDragging = null;
                 }
-                else
-                {
-                    currentlyDragging = null;
-                }
+                
+                currentlyDragging = null;
+                RemoveHighlightTiles();
             }
         }
         else
         {
             if (currentHover != -Vector2Int.one)
             {
-                tiles[currentHover.x, currentHover.y].layer = LayerMask.NameToLayer("Tile");
+                tiles[currentHover.x, currentHover.y].layer = 
+                    ContainsValidMove(ref availableMoves, currentHover) ? 
+                    LayerMask.NameToLayer("Highlight") : 
+                    LayerMask.NameToLayer("Tile");
+
                 currentHover = -Vector2Int.one;
             }
 
@@ -108,6 +137,7 @@ public class Chessboard : MonoBehaviour
             {
                 currentlyDragging.SetPosition(GetTileCenter(currentlyDragging.CurrentX, currentlyDragging.CurrentY));
                 currentlyDragging = null;
+                RemoveHighlightTiles();
             }
         }
 
@@ -121,6 +151,23 @@ public class Chessboard : MonoBehaviour
                 currentlyDragging.SetPosition(ray.GetPoint(distance) + Vector3.up * dragOffset);
             }
         }
+    }
+
+    // Highlight Tiles
+    private void HighlightTiles()
+    {
+        for (int i = 0; i < availableMoves.Count; i++)
+        {
+            tiles[availableMoves[i].x, availableMoves[i].y].layer = LayerMask.NameToLayer("Highlight");
+        }
+    }
+    private void RemoveHighlightTiles()
+    {
+        for (int i = 0; i < availableMoves.Count; i++)
+        {
+            tiles[availableMoves[i].x, availableMoves[i].y].layer = LayerMask.NameToLayer("Tile");
+        }
+        availableMoves.Clear();
     }
 
     // Generate the board
@@ -174,42 +221,32 @@ public class Chessboard : MonoBehaviour
         int whiteTeam = 0;
         int blackTeam = 1;
 
-        ChessPiece whiteKnightLeft = null;
-        ChessPiece whiteKnightRight = null;
-
         // Spawning white team
         chessPieces[0, 0] = SpawnSinglePiece(ChessPieceType.Rook, whiteTeam);
-        whiteKnightLeft = chessPieces[1, 0] = SpawnSinglePiece(ChessPieceType.Knight, whiteTeam);
+        chessPieces[1, 0] = SpawnSinglePiece(ChessPieceType.Knight, whiteTeam);
         chessPieces[2, 0] = SpawnSinglePiece(ChessPieceType.Bishop, whiteTeam);
         chessPieces[3, 0] = SpawnSinglePiece(ChessPieceType.Queen, whiteTeam);
         chessPieces[4, 0] = SpawnSinglePiece(ChessPieceType.King, whiteTeam);
         chessPieces[5, 0] = SpawnSinglePiece(ChessPieceType.Bishop, whiteTeam);
-        whiteKnightRight = chessPieces[6, 0] = SpawnSinglePiece(ChessPieceType.Knight, whiteTeam);
+        chessPieces[6, 0] = SpawnSinglePiece(ChessPieceType.Knight, whiteTeam);
         chessPieces[7, 0] = SpawnSinglePiece(ChessPieceType.Rook, whiteTeam);
 
-        whiteKnightLeft.gameObject.transform.rotation = Quaternion.Euler(0, -90, 0);
-        whiteKnightRight.gameObject.transform.rotation = Quaternion.Euler(0, -90, 0);
 
         for (int i = 0; i < TILE_COUNT_X; i++)
         {
             chessPieces[i, 1] = SpawnSinglePiece(ChessPieceType.Pawn, whiteTeam);
         }
 
-        ChessPiece blackKnightLeft = null;
-        ChessPiece blackKnightRight = null;
 
         // Spawning black team
         chessPieces[0, 7] = SpawnSinglePiece(ChessPieceType.Rook, blackTeam);
-        blackKnightLeft = chessPieces[1, 7] = SpawnSinglePiece(ChessPieceType.Knight, blackTeam);
+        chessPieces[1, 7] = SpawnSinglePiece(ChessPieceType.Knight, blackTeam);
         chessPieces[2, 7] = SpawnSinglePiece(ChessPieceType.Bishop, blackTeam);
         chessPieces[3, 7] = SpawnSinglePiece(ChessPieceType.Queen, blackTeam);
         chessPieces[4, 7] = SpawnSinglePiece(ChessPieceType.King, blackTeam);
         chessPieces[5, 7] = SpawnSinglePiece(ChessPieceType.Bishop, blackTeam);
-        blackKnightRight = chessPieces[6, 7] = SpawnSinglePiece(ChessPieceType.Knight, blackTeam);
+        chessPieces[6, 7] = SpawnSinglePiece(ChessPieceType.Knight, blackTeam);
         chessPieces[7, 7] = SpawnSinglePiece(ChessPieceType.Rook, blackTeam);
-
-        blackKnightRight.gameObject.transform.rotation = Quaternion.Euler(0, 90, 0);
-        blackKnightLeft.gameObject.transform.rotation = Quaternion.Euler(0, 90, 0);
         
 
         for (int i = 0; i < TILE_COUNT_X; i++)
@@ -254,9 +291,328 @@ public class Chessboard : MonoBehaviour
         return new Vector3(x * tileSize, yOffset, y * tileSize) - bounds + tileCenter;
     }
 
+    // Checkmate
+    private void Checkmate(int team)
+    {
+        DisplayVictory(team);
+    }
+    private void DisplayVictory(int winningTeam)
+    {
+        victoryScreen.SetActive(true);
+        victoryScreen.transform.GetChild(winningTeam).gameObject.SetActive(true);
+    }
+    public void OnResetButton()
+    {
+        victoryScreen.transform.GetChild(0).gameObject.SetActive(false);
+        victoryScreen.transform.GetChild(1).gameObject.SetActive(false);
+        victoryScreen.SetActive(false);
 
+        currentlyDragging = null;
+        availableMoves.Clear();
+        moveList.Clear();
+
+        // clean up board
+        for (int x = 0; x < TILE_COUNT_X; x++)
+        {
+            for (int y = 0; y < TILE_COUNT_Y; y++)
+            {
+                if (chessPieces[x, y] != null)
+                    Destroy(chessPieces[x, y].gameObject);
+
+                chessPieces[x, y] = null;
+            }
+        }
+
+
+        for (int i = 0; i < deadWhites.Count; i++)  
+            Destroy(deadWhites[i].gameObject);
+
+        for (int i = 0; i < deadBlackes.Count; i++)
+            Destroy(deadBlackes[i].gameObject);
+
+        deadWhites.Clear();
+        deadBlackes.Clear();
+
+        SpawnAllPieces();
+        PositionAllPieces();
+        isWhiteTurn = true;
+    }
+    public void OnExiteButton()
+    {
+        Application.Quit();
+    }
+
+    // SpecialMoves
+    private void ProcessSpecialMove()
+    {
+        if(specialMove == SpecialMove.InPassing)
+        {
+            var newMove = moveList[moveList.Count - 1];
+            ChessPiece myPawn = chessPieces[newMove[1].x, newMove[1].y];
+            var targetPawnPosition = moveList[moveList.Count - 2];
+            ChessPiece enemyPawn = chessPieces[targetPawnPosition[1].x, targetPawnPosition[1].y];
+
+            if (myPawn.CurrentX == enemyPawn.CurrentX)
+            {
+                if (myPawn.CurrentY == enemyPawn.CurrentY - 1 || myPawn.CurrentY == enemyPawn.CurrentY + 1)
+                {
+                    if (enemyPawn.Team == 0)
+                    {
+                        deadWhites.Add(enemyPawn);
+                        enemyPawn.SetScale(Vector3.one * deathSize);
+                        enemyPawn.SetPosition(new Vector3(8.3f * tileSize, yOffset, -1 * tileSize)
+                            - bounds + new Vector3(tileSize / 2, 0, tileSize / 2)
+                            + (Vector3.forward * deathSpacing) * deadWhites.Count);
+                    }
+                    else
+                    {
+                        deadBlackes.Add(enemyPawn);
+                        enemyPawn.SetScale(Vector3.one * deathSize);
+                        enemyPawn.SetPosition(new Vector3(-1.3f * tileSize, yOffset, 8f * tileSize)
+                            - bounds + new Vector3(tileSize / 2, 0, tileSize / 2)
+                            + (Vector3.back * deathSpacing) * deadBlackes.Count);
+                    }
+
+                    chessPieces[enemyPawn.CurrentX, enemyPawn.CurrentY] = null;
+                }
+            }
+        }
+
+        if (specialMove == SpecialMove.Promotion)
+        {
+            Vector2Int[] lastMove = moveList[moveList.Count - 1];
+            ChessPiece targetPawn = chessPieces[lastMove[1].x, lastMove[1].y];
+
+            if(targetPawn.ChessPieceType == ChessPieceType.Pawn)
+            {
+                if (targetPawn.Team == 0 && lastMove[1].y == 7)
+                {
+                    ChessPiece newQuenn = SpawnSinglePiece(ChessPieceType.Queen, 0);
+                    newQuenn.transform.position = chessPieces[lastMove[1].x, lastMove[1].y].transform.position;
+                    Destroy(chessPieces[lastMove[1].x, lastMove[1].y].gameObject);
+                    chessPieces[lastMove[1].x, lastMove[1].y] = newQuenn;
+                    PositionSinglePiece(lastMove[1].x, lastMove[1].y);
+                }
+                if (targetPawn.Team == 1 && lastMove[1].y == 0)
+                {
+                    ChessPiece newQuenn = SpawnSinglePiece(ChessPieceType.Queen, 1);
+                    newQuenn.transform.position = chessPieces[lastMove[1].x, lastMove[1].y].transform.position;
+                    Destroy(chessPieces[lastMove[1].x, lastMove[1].y].gameObject);
+                    chessPieces[lastMove[1].x, lastMove[1].y] = newQuenn;
+                    PositionSinglePiece(lastMove[1].x, lastMove[1].y);
+                }
+            }
+        }
+
+        if (specialMove == SpecialMove.Castling)
+        {
+            Vector2Int[] lastMove = moveList[moveList.Count - 1];
+
+            // left rook
+            if (lastMove[1].x == 2)
+            {
+                if (lastMove[1].y == 0) // white side
+                {
+                    ChessPiece whiteRook = chessPieces[0, 0];
+                    chessPieces[3, 0] = whiteRook;
+                    PositionSinglePiece(3, 0);
+                    chessPieces[0, 0] = null;
+                }
+                else if (lastMove[1].y == 7) // black side
+                {
+                    ChessPiece blackRook = chessPieces[0, 7];
+                    chessPieces[3, 7] = blackRook;
+                    PositionSinglePiece(3, 7);
+                    chessPieces[0, 7] = null;
+                }
+            }
+            // right rook
+            else if (lastMove[1].x == 6)
+            {
+                if (lastMove[1].y == 0) // white side
+                {
+                    ChessPiece whiteRook = chessPieces[7, 0];
+                    chessPieces[5, 0] = whiteRook;
+                    PositionSinglePiece(5, 0);
+                    chessPieces[7, 0] = null;
+                }
+                else if (lastMove[1].y == 7) // black side
+                {
+                    ChessPiece blackRook = chessPieces[7, 7];
+                    chessPieces[5, 7] = blackRook;
+                    PositionSinglePiece(5, 7);
+                    chessPieces[7, 7] = null;
+                }
+            }
+        }
+    }
+    private void PreventCheck() 
+    {
+        ChessPiece targetKing = null;
+
+        for (int x = 0; x < TILE_COUNT_X; x++)
+            for (int y = 0; y < TILE_COUNT_Y; y++)
+                if(chessPieces[x, y] != null)
+                    if (chessPieces[x, y].ChessPieceType == ChessPieceType.King)
+                        if (chessPieces[x, y].Team == currentlyDragging.Team)
+                            targetKing = chessPieces[x, y];
+
+        SimulateMoveForSinglePiece(currentlyDragging, ref availableMoves, targetKing);
+    }
+    private void SimulateMoveForSinglePiece(ChessPiece cp, ref List<Vector2Int> availbleMoves, ChessPiece targetKing)
+    {
+        // Save the current values to reset after the function call
+        int actualX = cp.CurrentX;
+        int actualY = cp.CurrentY;
+        List<Vector2Int> movesToRemove = new List<Vector2Int>();
+
+        // Going through all the moves, simulate them and check if we're in check 
+        for (int i = 0; i < availbleMoves.Count; i++)
+        {
+            int simulationX = availbleMoves[i].x;
+            int simulationY = availbleMoves[i].y;
+
+            Vector2Int kingPositionThisSimulation = new Vector2Int(targetKing.CurrentX, targetKing.CurrentY);
+
+            // Did we simulate the king's move
+            if (cp.ChessPieceType == ChessPieceType.King)
+                kingPositionThisSimulation = new Vector2Int(simulationX, simulationY);
+
+
+            // Copy the [,] and mot a reference
+            ChessPiece[,] simulation = new ChessPiece[TILE_COUNT_X, TILE_COUNT_Y];
+            List<ChessPiece> simulationAttackingPieces = new List<ChessPiece>();
+
+            for (int x = 0; x < TILE_COUNT_X; x++)
+            {
+                for (int y = 0; y < TILE_COUNT_Y; y++)
+                {
+                    if (chessPieces[x, y] != null)
+                    {
+                        simulation[x, y] = chessPieces[x, y];
+                        if (simulation[x, y].Team != cp.Team)
+                            simulationAttackingPieces.Add(simulation[x, y]);
+                    }
+                }
+            }
+
+            // Simulate that move
+            simulation[actualX, actualY] = null;
+            cp.CurrentX = simulationX;
+            cp.CurrentY = simulationY;
+            simulation[simulationX, simulationY] = cp;
+
+            // Did one of the piece got taken down during our simulation
+            var deadPiece = simulationAttackingPieces.Find(c => c.CurrentX == simulationX && c.CurrentY == simulationY);
+            if (deadPiece != null)
+                simulationAttackingPieces.Remove(deadPiece);
+
+            // Get all the simulated attacking pieces moves
+            List<Vector2Int> simulationMoves = new List<Vector2Int>();
+
+            for (int a = 0; a < simulationAttackingPieces.Count; a++)
+            {
+                var pieceMoves = simulationAttackingPieces[a].GetAvailableMoves(ref simulation, TILE_COUNT_X, TILE_COUNT_Y);
+                for (int b = 0; b < pieceMoves.Count; b++)
+                {
+                    simulationMoves.Add(pieceMoves[b]);
+                }
+            }
+
+            // Is the king in trouble? if so, remove the move
+            if (ContainsValidMove(ref simulationMoves, kingPositionThisSimulation))
+            {
+                movesToRemove.Add(availbleMoves[i]);
+            }
+
+            // Restore the actual CP data
+            cp.CurrentX = actualX;
+            cp.CurrentY = actualY;
+        }
+
+        // Remove from the current availble move list
+        for (int i = 0; i < movesToRemove.Count; i++)
+        {
+            availbleMoves.Remove(movesToRemove[i]);
+        }
+    }
+    private bool CheckForCheckmate()
+    {
+        var lastMove = moveList[moveList.Count - 1];
+        int targetTeam = chessPieces[lastMove[1].x, lastMove[1].y].Team == 0 ? 1 : 0;
+
+        List<ChessPiece> attackingPieces = new List<ChessPiece>();
+        List<ChessPiece> defendingPieces = new List<ChessPiece>();
+        ChessPiece targetKing = null;
+
+        for (int x = 0; x < TILE_COUNT_X; x++)
+            for (int y = 0; y < TILE_COUNT_Y; y++)
+                if (chessPieces[x, y] != null)
+                {
+                    if (chessPieces[x, y].Team == targetTeam)
+                    {
+                        defendingPieces.Add(chessPieces[x, y]);
+                        if (chessPieces[x, y].ChessPieceType == ChessPieceType.King)
+                            targetKing = chessPieces[x, y];
+                    }
+                    else
+                    {
+                        attackingPieces.Add(chessPieces[x, y]);
+                    }
+                }
+
+        // Is the king attacked right now
+        List<Vector2Int> currentAvailableMoves = new List<Vector2Int>();
+
+        for (int i = 0; i < attackingPieces.Count; i++)
+        {
+            var pieceMoves = attackingPieces[i].GetAvailableMoves(ref chessPieces, TILE_COUNT_X, TILE_COUNT_Y);
+            for (int b = 0; b < pieceMoves.Count; b++)
+            {
+                currentAvailableMoves.Add(pieceMoves[b]);
+            }
+        }
+        // Are we in check right now?
+        if (ContainsValidMove(ref currentAvailableMoves, new Vector2Int(targetKing.CurrentX, targetKing.CurrentY)))
+        {
+            // king is under attack, can we move something to help him?
+            for (int i = 0; i < defendingPieces.Count; i++)
+            {
+                List<Vector2Int> defendingMoves = defendingPieces[i].GetAvailableMoves(ref chessPieces, TILE_COUNT_X, TILE_COUNT_Y);
+                SimulateMoveForSinglePiece(defendingPieces[i], ref defendingMoves, targetKing);
+
+                if (defendingMoves.Count != 0)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    // Operations
+    private bool ContainsValidMove(ref List<Vector2Int> moves, Vector2Int pos)
+    {
+        for (int i = 0; i < moves.Count; i++)
+        {
+            if (moves[i].x == pos.x && moves[i].y == pos.y)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     private bool MoveTo(ChessPiece cp, int x, int y)
     {
+        if (!ContainsValidMove(ref availableMoves, new Vector2Int(x, y)))
+        {
+            return false;
+        }
+
         Vector2Int previousPosition = new Vector2Int(cp.CurrentX, cp.CurrentY);
 
         if(chessPieces[x, y] != null)
@@ -270,6 +626,11 @@ public class Chessboard : MonoBehaviour
 
             if (ocp.Team == 0)
             {
+                if (ocp.ChessPieceType == ChessPieceType.King)
+                {
+                    Checkmate(1);
+                }
+
                 deadWhites.Add(ocp);
                 ocp.SetScale(Vector3.one * deathSize);
                 ocp.SetPosition(new Vector3(8.3f * tileSize, yOffset, -1 * tileSize)
@@ -278,6 +639,11 @@ public class Chessboard : MonoBehaviour
             }
             else
             {
+                if (ocp.ChessPieceType == ChessPieceType.King)
+                {
+                    Checkmate(0);
+                }
+
                 deadBlackes.Add(ocp);
                 ocp.SetScale(Vector3.one * deathSize);
                 ocp.SetPosition(new Vector3(-1.3f * tileSize, yOffset, 8f * tileSize)
@@ -291,6 +657,13 @@ public class Chessboard : MonoBehaviour
         chessPieces[previousPosition.x, previousPosition.y] = null;
 
         PositionSinglePiece(x, y);
+
+        isWhiteTurn = !isWhiteTurn;
+        moveList.Add(new Vector2Int[] { previousPosition, new Vector2Int(x, y)});
+
+        ProcessSpecialMove();
+        if (CheckForCheckmate())
+            Checkmate(cp.Team);
 
         return true;
     }
