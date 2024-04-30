@@ -1,8 +1,7 @@
-using System;
-using System.Collections;
 using System.Collections.Generic;
+using Unity.Networking.Transport;
 using UnityEngine;
-
+using UnityEngine.UI;
 
 public enum SpecialMove
 {
@@ -23,6 +22,8 @@ public class Chessboard : MonoBehaviour
     [SerializeField] private float deathSpacing = 0.3f;
     [SerializeField] private float dragOffset = 1f;
     [SerializeField] private GameObject victoryScreen;
+    [SerializeField] private Transform rematchIndicator;
+    [SerializeField] private Button rematchButton;
 
     [Header("Prefabs & Materials")]
     [SerializeField] private GameObject[] prefabs;
@@ -47,7 +48,12 @@ public class Chessboard : MonoBehaviour
     private SpecialMove specialMove;
     private List<Vector2Int[]> moveList = new List<Vector2Int[]>();
 
-    private void Awake()
+    private int playerCount = -1;
+    private int currentTeam = -1;
+    private bool localGame = true;
+    private bool[] playerRematch = new bool[2];
+
+    private void Start()
     {
         isWhiteTurn = true;
 
@@ -55,6 +61,13 @@ public class Chessboard : MonoBehaviour
         tileCenter = new Vector3(tileSize / 2, 0, tileSize / 2);
         SpawnAllPieces();
         PositionAllPieces();
+
+        ResgisterEvents();
+    }
+
+    private void OnDisable()
+    {
+        UnregisterEvents();
     }
 
     private void Update()
@@ -94,8 +107,8 @@ public class Chessboard : MonoBehaviour
                 if (chessPieces[hitPosition.x, hitPosition.y] != null)
                 {
                     // Is it our turn?
-                    if (chessPieces[hitPosition.x, hitPosition.y].Team == 0 && isWhiteTurn ||
-                        chessPieces[hitPosition.x, hitPosition.y].Team == 1 && !isWhiteTurn)
+                    if (chessPieces[hitPosition.x, hitPosition.y].Team == 0 && isWhiteTurn && currentTeam == 0 ||
+                        chessPieces[hitPosition.x, hitPosition.y].Team == 1 && !isWhiteTurn && currentTeam == 1)
                     {
                         currentlyDragging = chessPieces[hitPosition.x, hitPosition.y];
                         availableMoves = currentlyDragging.GetAvailableMoves(ref chessPieces, TILE_COUNT_X, TILE_COUNT_Y);
@@ -109,16 +122,26 @@ public class Chessboard : MonoBehaviour
             if (currentlyDragging != null && Input.GetMouseButtonUp(0))
             {
                 Vector2Int previousPosition = new Vector2Int(currentlyDragging.CurrentX, currentlyDragging.CurrentY);
+                
+                if (ContainsValidMove(ref availableMoves, new Vector2Int(hitPosition.x, hitPosition.y)))
+                {
+                    MoveTo(previousPosition.x, previousPosition.y, hitPosition.x, hitPosition.y);
 
-                bool validMove = MoveTo(currentlyDragging, hitPosition.x, hitPosition.y);
-
-                if (!validMove)
+                    // Net implementation
+                    NetMakeMove mm = new NetMakeMove();
+                    mm.OriginalX = previousPosition.x;
+                    mm.OriginalY = previousPosition.y;
+                    mm.DestinationX = hitPosition.x;
+                    mm.DestinationY = hitPosition.y;
+                    mm.TeamId = currentTeam;
+                    Client.Instance.SendToServer(mm);
+                }
+                else
                 {
                     currentlyDragging.SetPosition(GetTileCenter(previousPosition.x, previousPosition.y));
+                    currentlyDragging = null;
+                    RemoveHighlightTiles();
                 }
-                
-                currentlyDragging = null;
-                RemoveHighlightTiles();
             }
         }
         else
@@ -301,8 +324,36 @@ public class Chessboard : MonoBehaviour
         victoryScreen.SetActive(true);
         victoryScreen.transform.GetChild(winningTeam).gameObject.SetActive(true);
     }
-    public void OnResetButton()
+    public void OnRematchButton()
     {
+        if (localGame)
+        {
+            NetRematch wrm = new NetRematch();
+            wrm.TeamId = 0;
+            wrm.WantRematch = 1;
+            Client.Instance.SendToServer(wrm);
+
+            NetRematch brm = new NetRematch();
+            brm.TeamId = 1;
+            brm.WantRematch = 1;
+            Client.Instance.SendToServer(brm);
+        }
+        else
+        {
+            NetRematch rm = new NetRematch();
+            rm.TeamId = currentTeam;
+            rm.WantRematch = 1;
+            Client.Instance.SendToServer(rm);
+        }
+    }
+
+    public void GameReset()
+    {
+        rematchButton.interactable = true;
+
+        rematchIndicator.transform.GetChild(0).gameObject.SetActive(false);
+        rematchIndicator.transform.GetChild(1).gameObject.SetActive(false);
+
         victoryScreen.transform.GetChild(0).gameObject.SetActive(false);
         victoryScreen.transform.GetChild(1).gameObject.SetActive(false);
         victoryScreen.SetActive(false);
@@ -310,6 +361,7 @@ public class Chessboard : MonoBehaviour
         currentlyDragging = null;
         availableMoves.Clear();
         moveList.Clear();
+        playerRematch[0] = playerRematch[1] = false;
 
         // clean up board
         for (int x = 0; x < TILE_COUNT_X; x++)
@@ -324,7 +376,7 @@ public class Chessboard : MonoBehaviour
         }
 
 
-        for (int i = 0; i < deadWhites.Count; i++)  
+        for (int i = 0; i < deadWhites.Count; i++)
             Destroy(deadWhites[i].gameObject);
 
         for (int i = 0; i < deadBlackes.Count; i++)
@@ -337,9 +389,20 @@ public class Chessboard : MonoBehaviour
         PositionAllPieces();
         isWhiteTurn = true;
     }
-    public void OnExiteButton()
+    public void OnMenuButton()
     {
-        Application.Quit();
+        NetRematch rm = new NetRematch();
+        rm.TeamId = currentTeam;
+        rm.WantRematch = 0;
+        Client.Instance.SendToServer(rm);
+
+        GameReset();
+        GameUI.Instance.OnLeaveFromGameMenu();
+
+        Invoke("ShutdownRelay", 1);
+
+        playerCount = -1;
+        currentTeam = -1;
     }
 
     // SpecialMoves
@@ -606,14 +669,10 @@ public class Chessboard : MonoBehaviour
 
         return false;
     }
-    private bool MoveTo(ChessPiece cp, int x, int y)
+    private void MoveTo(int originalX, int originalY, int x, int y)
     {
-        if (!ContainsValidMove(ref availableMoves, new Vector2Int(x, y)))
-        {
-            return false;
-        }
-
-        Vector2Int previousPosition = new Vector2Int(cp.CurrentX, cp.CurrentY);
+        ChessPiece cp = chessPieces[originalX, originalY];
+        Vector2Int previousPosition = new Vector2Int(originalX, originalY);
 
         if(chessPieces[x, y] != null)
         {
@@ -621,7 +680,7 @@ public class Chessboard : MonoBehaviour
 
             if (cp.Team == ocp.Team)
             {
-                return false;
+                return;
             }
 
             if (ocp.Team == 0)
@@ -659,13 +718,24 @@ public class Chessboard : MonoBehaviour
         PositionSinglePiece(x, y);
 
         isWhiteTurn = !isWhiteTurn;
+        if (localGame)
+        {
+            currentTeam = (currentTeam == 0) ? 1 : 0;
+        }
+
         moveList.Add(new Vector2Int[] { previousPosition, new Vector2Int(x, y)});
 
         ProcessSpecialMove();
+
+        if(currentlyDragging)
+            currentlyDragging = null;
+
+        RemoveHighlightTiles();
+
         if (CheckForCheckmate())
             Checkmate(cp.Team);
 
-        return true;
+        return;
     }
     private Vector2Int LookupTileIndex(GameObject hitInfo)
     {
@@ -682,4 +752,144 @@ public class Chessboard : MonoBehaviour
 
         return -Vector2Int.one;
     }
+
+    #region Events_Lgc
+
+    private void ResgisterEvents()
+    {
+        NetUtility.SERVER_WELCOME += OnWelcomeServer;
+        NetUtility.SERVER_MAKE_MOVE += OnMakeMoveServer;
+        NetUtility.SERVER_REMATCH += OnRematchServer;
+
+        NetUtility.CLIENT_WELCOME += OnWelcomeClient;
+        NetUtility.CLIENT_START_GAME += OnStartGameClient;
+        NetUtility.CLIENT_MAKE_MOVE += OnMakeMoveClient;
+        NetUtility.CLIENT_REMATCH += OnRematchClient;
+
+        GameUI.Instance.SetLocalGame += OnSetLocalGame;
+    }
+
+    private void UnregisterEvents()
+    {
+        NetUtility.SERVER_WELCOME -= OnWelcomeServer;
+        NetUtility.SERVER_MAKE_MOVE -= OnMakeMoveServer;
+        NetUtility.SERVER_REMATCH -= OnRematchServer;
+
+
+        NetUtility.CLIENT_WELCOME -= OnWelcomeClient;
+        NetUtility.CLIENT_START_GAME -= OnStartGameClient;
+        NetUtility.CLIENT_MAKE_MOVE -= OnMakeMoveClient;
+        NetUtility.CLIENT_REMATCH -= OnRematchClient;
+
+
+        GameUI.Instance.SetLocalGame -= OnSetLocalGame;
+    }
+
+    // Server
+    private void OnWelcomeServer(NetMessage msg, NetworkConnection cnn)
+    {
+        // Client has connected, assign a team and return the message back to him
+        NetWelcome nw = msg as NetWelcome;
+
+        // Assign the team
+        nw.AssignedTeam = ++playerCount;
+
+        // Return back to the client
+        Server.Instance.SendToClient(cnn, nw);
+
+        // If full, start the game
+        if (playerCount == 1)
+        {
+            Server.Instance.Broadcast(new NetStartGame());
+        }
+    }
+
+    private void OnMakeMoveServer(NetMessage msg, NetworkConnection cnn)
+    {
+        // Recive the message, broadcast it back
+        NetMakeMove mm = msg as NetMakeMove;
+
+        // Broadcat it back
+        Server.Instance.Broadcast(mm);
+    }
+
+    private void OnRematchServer(NetMessage msg, NetworkConnection cnn)
+    {
+        Server.Instance.Broadcast(msg);
+    }
+
+    // Client
+    private void OnWelcomeClient(NetMessage msg)
+    {
+        // Receive the connection message
+        NetWelcome nw = msg as NetWelcome;
+
+        // Assign the team
+        currentTeam = nw.AssignedTeam;
+
+        Debug.Log($"My assigned team is {nw.AssignedTeam}");
+
+        if (localGame && currentTeam == 0)
+        {
+            Server.Instance.Broadcast(new NetStartGame());
+        }
+    }
+
+    private void OnStartGameClient(NetMessage msg)
+    {
+        // We need to change the camera
+        GameUI.Instance.ChangeCamera((currentTeam == 0) ? CameraAngle.WhiteTeam : CameraAngle.BlackTeam);
+    }
+
+    private void OnMakeMoveClient(NetMessage msg)
+    {
+        NetMakeMove mm = msg as NetMakeMove;
+
+        Debug.Log($"MM : {mm.TeamId} : {mm.OriginalX} {mm.OriginalY} --> {mm.DestinationX} {mm.DestinationY}");
+
+        if (mm.TeamId != currentTeam)
+        {
+            ChessPiece target = chessPieces[mm.OriginalX, mm.OriginalY];
+            availableMoves = target.GetAvailableMoves(ref chessPieces, TILE_COUNT_X, TILE_COUNT_Y);
+            specialMove = target.GetSpecialMove(ref chessPieces, ref moveList, ref availableMoves);
+
+            MoveTo(mm.OriginalX, mm.OriginalY, mm.DestinationX, mm.DestinationY);
+        }
+    }
+
+    private void OnRematchClient(NetMessage msg)
+    {
+        // Receive the connection message
+        NetRematch rm = msg as NetRematch;
+
+        // Set the boolean for rematch
+        playerRematch[rm.TeamId] = rm.WantRematch == 1;
+
+        // Activate the piece of UI
+        if (rm.TeamId != currentTeam)
+        {
+            rematchIndicator.transform.GetChild((rm.WantRematch == 1) ? 0 : 1).gameObject.SetActive(true);
+            if (rm.WantRematch != 1)
+                rematchButton.interactable = false;
+        }
+
+        // If both wants to rematch
+        if (playerRematch[0] && playerRematch[1])
+            GameReset();
+    }
+
+    private void ShutdownRelay()
+    {
+        Client.Instance.Shutdown();
+        Server.Instance.Shutdown();
+    }
+
+    private void OnSetLocalGame(bool isSetLocal)
+    {
+        playerCount = -1;
+        currentTeam = -1;
+        localGame = isSetLocal;
+    }
+
+    #endregion
 }
